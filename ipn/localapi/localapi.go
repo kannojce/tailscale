@@ -52,6 +52,7 @@ var handler = map[string]localAPIHandler{
 	"cert/":     (*Handler).serveCert,
 	"file-put/": (*Handler).serveFilePut,
 	"files/":    (*Handler).serveFiles,
+	"profiles/": (*Handler).serveProfiles,
 
 	// The other /localapi/v0/NAME handlers are exact matches and contain only NAME
 	// without a trailing slash:
@@ -1071,6 +1072,73 @@ func (h *Handler) serveTKAModify(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(j)
+}
+
+// serveProfiles serves profile switching-related endpoints. Supported methods
+// and paths are:
+//   - GET /profiles/: list all profiles (JSON-encoded array of ipn.LoginProfiles)
+//   - PUT /profiles/: add new profile (no response). A separate
+//     StartLoginInteractive() is needed to populate and persist the new profile.
+//   - GET /profiles/current: current profile (JSON-ecoded ipn.LoginProfile)
+//   - POST /profiles/<id>: switch to profile (no response)
+//   - DELETE /profiles/<id>: delete profile (no response)
+func (h *Handler) serveProfiles(w http.ResponseWriter, r *http.Request) {
+	if !h.PermitWrite {
+		http.Error(w, "profiles access denied", http.StatusForbidden)
+		return
+	}
+	suffix, ok := strs.CutPrefix(r.URL.EscapedPath(), "/localapi/v0/profiles/")
+	if !ok {
+		panic("misconfigured")
+	}
+	if suffix == "" {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(h.b.ListProfiles())
+		case http.MethodPut:
+			h.b.NewProfile()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	suffix, err := url.PathUnescape(suffix)
+	if err != nil {
+		http.Error(w, "bad profile ID", http.StatusBadRequest)
+		return
+	}
+	if suffix == "current" {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(h.b.CurrentProfile())
+		default:
+			http.Error(w, "use GET", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	profileID := ipn.ProfileID(suffix)
+	switch r.Method {
+	case http.MethodPost:
+		err := h.b.SwitchProfile(profileID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		err := h.b.DeleteProfile(profileID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "use POST or DELETE", http.StatusMethodNotAllowed)
+	}
 }
 
 func defBool(a string, def bool) bool {
