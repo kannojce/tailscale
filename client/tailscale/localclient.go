@@ -895,3 +895,39 @@ func (r jsonReader) Read(p []byte) (n int, err error) {
 	}
 	return r.b.Read(p)
 }
+
+// ProfileStatus returns the current profile and the list of all profiles.
+func (lc *LocalClient) ProfileStatus(ctx context.Context) (current ipn.LoginProfile, all []ipn.LoginProfile, err error) {
+	body, err := lc.send(ctx, "GET", "/localapi/v0/profiles/current", 200, nil)
+	if err != nil {
+		return
+	}
+	current, err = decodeJSON[ipn.LoginProfile](body)
+	if err != nil {
+		return
+	}
+	body, err = lc.send(ctx, "GET", "/localapi/v0/profiles/", 200, nil)
+	if err != nil {
+		return
+	}
+	all, err = decodeJSON[[]ipn.LoginProfile](body)
+	return current, all, err
+}
+
+// NewProfile creates and switches to a new profile.
+func (lc *LocalClient) NewProfile(ctx context.Context) error {
+	_, err := lc.send(ctx, "PUT", "/localapi/v0/profiles/", 204, nil)
+	return err
+}
+
+// SwitchProfile switches to the given profile.
+func (lc *LocalClient) SwitchProfile(ctx context.Context, profile ipn.ProfileID) error {
+	_, err := lc.send(ctx, "POST", "/localapi/v0/profiles/"+url.PathEscape(string(profile)), 204, nil)
+	return err
+}
+
+// DeleteProfile removes the profile with the given name.
+func (lc *LocalClient) DeleteProfile(ctx context.Context, profile ipn.ProfileID) error {
+	_, err := lc.send(ctx, "DELETE", "/localapi/v0/profiles"+url.PathEscape(string(profile)), 201, nil)
+	return err
+}

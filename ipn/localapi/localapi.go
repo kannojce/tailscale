@@ -1097,8 +1097,11 @@ func (h *Handler) serveProfiles(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(h.b.ListProfiles())
 		case http.MethodPut:
-			h.b.NewProfile()
-			w.WriteHeader(http.StatusNoContent)
+			if err := h.b.NewProfile(); err != nil {
+				http.Error(w, "new profile failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
 		default:
 			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
 		}
