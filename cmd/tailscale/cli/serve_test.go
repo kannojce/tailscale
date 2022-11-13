@@ -9,6 +9,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -32,10 +34,11 @@ func TestServeConfigMutations(t *testing.T) {
 		steps = append(steps, s)
 	}
 
+	// ingress
 	add(step{reset: true})
 	add(step{
 		command: cmd("ingress on"),
-		want:    &ipn.ServeConfig{AllowIngress: map[ipn.HostPort]bool{"foo:123": true}},
+		want:    &ipn.ServeConfig{AllowIngress: map[ipn.HostPort]bool{"foo:443": true}},
 	})
 	add(step{
 		command: cmd("ingress on"),
@@ -53,6 +56,284 @@ func TestServeConfigMutations(t *testing.T) {
 		command: cmd("ingress"),
 		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
 	})
+
+	// https
+	add(step{reset: true})
+	add(step{
+		command: cmd("/ proxy 0"), // invalid port, too low
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{
+		command: cmd("/ proxy 65536"), // invalid port, too high
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{
+		command: cmd("/ proxy somehost"), // invalid host
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{
+		command: cmd("/ proxy http://otherhost"), // invalid host
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{
+		command: cmd("/ proxy httpz://127.0.0.1"), // invalid scheme
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{
+		command: cmd("/ proxy 3000"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+	add(step{
+		command: cmd("bar proxy https://127.0.0.1:8443"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/":    {Proxy: "http://127.0.0.1:3000"},
+					"/bar": {Proxy: "https://127.0.0.1:8443"},
+				}},
+			},
+		},
+	})
+	add(step{
+		command: cmd("bar proxy https://127.0.0.1:8443"),
+		reset:   false,
+		want:    nil, // nothing to save
+	})
+	add(step{reset: true})
+	add(step{
+		command: cmd("/ proxy https+insecure://127.0.0.1:3001"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "https+insecure://127.0.0.1:3001"},
+				}},
+			},
+		},
+	})
+	add(step{reset: true})
+	add(step{
+		command: cmd("////foo proxy localhost:3000"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/foo": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+
+	// tcp
+	add(step{reset: true})
+	add(step{
+		command: cmd("tcp 5432"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{
+				443: {TCPForward: "127.0.0.1:5432"},
+			},
+		},
+	})
+	add(step{
+		command: cmd("tcp -terminate-tls 8443"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{
+				443: {
+					TCPForward:   "127.0.0.1:8443",
+					TerminateTLS: "foo",
+				},
+			},
+		},
+	})
+	add(step{
+		command: cmd("tcp -terminate-tls 8443"),
+		reset:   false,
+		want:    nil, // nothing to save
+	})
+	add(step{
+		command: cmd("tcp --terminate-tls 8444"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{
+				443: {
+					TCPForward:   "127.0.0.1:8444",
+					TerminateTLS: "foo",
+				},
+			},
+		},
+	})
+	add(step{
+		command: cmd("tcp -terminate-tls=false 8445"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{
+				443: {TCPForward: "127.0.0.1:8445"},
+			},
+		},
+	})
+
+	// text
+	add(step{reset: true})
+	add(step{
+		command: cmd("/ text hello"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Text: "hello"},
+				}},
+			},
+		},
+	})
+
+	// path
+	td := t.TempDir()
+	writeFile := func(suffix, contents string) {
+		if err := os.WriteFile(filepath.Join(td, suffix), []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(step{reset: true})
+	writeFile("foo", "this is foo")
+	add(step{
+		command: cmd("/ path " + filepath.Join(td, "foo")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Path: filepath.Join(td, "foo")},
+				}},
+			},
+		},
+	})
+	os.MkdirAll(filepath.Join(td, "subdir"), 0700)
+	writeFile("subdir/file-a", "this is A")
+	add(step{
+		command: cmd("/some/where path " + filepath.Join(td, "subdir/file-a")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/":           {Path: filepath.Join(td, "foo")},
+					"/some/where": {Path: filepath.Join(td, "subdir/file-a")},
+				}},
+			},
+		},
+	})
+	add(step{
+		command: cmd("/ path missing"),
+		reset:   false,
+		wantErr: exactErr(flag.ErrHelp, "flag.ErrHelp"),
+	})
+	add(step{reset: true})
+	add(step{
+		command: cmd("/ path " + filepath.Join(td, "subdir")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Path: filepath.Join(td, "subdir/")},
+				}},
+			},
+		},
+	})
+
+	// combos
+	add(step{reset: true})
+	add(step{
+		command: cmd("/ proxy 3000"),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+	add(step{
+		command: cmd("ingress on"),
+		want: &ipn.ServeConfig{
+			AllowIngress: map[ipn.HostPort]bool{"foo:443": true},
+			TCP:          map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+
+	// tricky steps
+	add(step{reset: true})
+	add(step{
+		command: cmd("/dir path " + filepath.Join(td, "subdir")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/dir/": {Path: filepath.Join(td, "subdir/")},
+				}},
+			},
+		},
+	}) // a directory with a trailing slash mount point
+	add(step{
+		command: cmd("/dir path " + filepath.Join(td, "foo")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/dir": {Path: filepath.Join(td, "foo")},
+				}},
+			},
+		},
+	}) // this should overwrite the previous one
+	add(step{reset: true})
+	add(step{
+		command: cmd("/dir path " + filepath.Join(td, "foo")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/dir": {Path: filepath.Join(td, "foo")},
+				}},
+			},
+		},
+	}) // a file without a trailing slash mount point
+	add(step{
+		command: cmd("/dir path " + filepath.Join(td, "subdir")),
+		reset:   false,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/dir/": {Path: filepath.Join(td, "subdir/")},
+				}},
+			},
+		},
+	}) // this should overwrite the previous one
 
 	// And now run the steps above.
 	var current *ipn.ServeConfig
@@ -79,6 +360,7 @@ func TestServeConfigMutations(t *testing.T) {
 				newState = c
 				return nil
 			},
+			testSelfDNSName: "foo",
 		}
 		cmd := newServeCommand(e)
 		err := cmd.ParseAndRun(context.Background(), st.command)

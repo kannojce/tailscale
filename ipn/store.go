@@ -119,7 +119,7 @@ type HostPort string
 
 // WebServerConfig describes a web server's configuration.
 type WebServerConfig struct {
-	Handlers map[string]*HTTPHandler
+	Handlers map[string]*HTTPHandler // mountPoint => handler
 }
 
 // TCPPortHandler describes what to do when handling a TCP
